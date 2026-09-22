@@ -23,13 +23,18 @@ import android.nfc.tech.NfcF;
 import android.nfc.tech.NfcV;
 import android.os.Build;
 import android.os.Bundle;
-import android.provider.Settings;
+import android.text.Editable;
+import android.text.InputType;
+import android.text.TextWatcher;
 import android.util.Base64;
 import android.view.Gravity;
-import android.view.View;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -50,6 +55,9 @@ public class MainActivity extends Activity {
     private TextView statusView;
     private TextView jsonView;
     private String lastJson = "";
+
+    private volatile String suppliedKeyHex = "";
+    private volatile boolean suppliedKeyIsA = true;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -75,23 +83,74 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(Color.rgb(15, 18, 24));
 
         TextView title = new TextView(this);
-        title.setText("NFC Diagnóstico");
+        title.setText("NFC Diagnóstico 1.1");
         title.setTextSize(24);
         title.setTextColor(Color.WHITE);
         title.setTypeface(null, 1);
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Lê somente informações que o Android disponibiliza legitimamente. Não tenta descobrir chaves, quebrar criptografia ou autenticar áreas protegidas.");
+        subtitle.setText("Mapeia tecnologias, setores e blocos. Opcionalmente testa UMA chave MIFARE Classic que você já possua. Não faz brute force, recuperação de chaves nem leitura/exportação de blocos protegidos.");
         subtitle.setTextSize(14);
         subtitle.setTextColor(Color.rgb(190, 195, 205));
-        subtitle.setPadding(0, dp(8), 0, dp(14));
+        subtitle.setPadding(0, dp(8), 0, dp(10));
         root.addView(subtitle);
+
+        TextView keyLabel = new TextView(this);
+        keyLabel.setText("Chave conhecida (opcional, 12 dígitos hex / 6 bytes)");
+        keyLabel.setTextSize(13);
+        keyLabel.setTextColor(Color.rgb(210, 214, 222));
+        root.addView(keyLabel);
+
+        LinearLayout keyRow = new LinearLayout(this);
+        keyRow.setOrientation(LinearLayout.HORIZONTAL);
+        keyRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        EditText keyInput = new EditText(this);
+        keyInput.setSingleLine(true);
+        keyInput.setHint("Ex.: A0A1A2A3A4A5");
+        keyInput.setTextColor(Color.WHITE);
+        keyInput.setHintTextColor(Color.rgb(120, 125, 135));
+        keyInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        keyInput.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                suppliedKeyHex = s.toString().replaceAll("[^0-9A-Fa-f]", "").toUpperCase(Locale.US);
+            }
+            @Override public void afterTextChanged(Editable s) {}
+        });
+        keyRow.addView(keyInput, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2));
+
+        Spinner keyType = new Spinner(this);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(
+                this,
+                android.R.layout.simple_spinner_item,
+                new String[]{"Key A", "Key B"}
+        );
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        keyType.setAdapter(adapter);
+        keyType.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, android.view.View view, int position, long id) {
+                suppliedKeyIsA = position == 0;
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        keyRow.addView(keyType, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+
+        root.addView(keyRow);
+
+        TextView keyNote = new TextView(this);
+        keyNote.setText("A chave digitada não é salva nem incluída no JSON. Para testar outra chave, altere o campo e aproxime o cartão novamente.");
+        keyNote.setTextSize(11);
+        keyNote.setTextColor(Color.rgb(145, 150, 160));
+        keyNote.setPadding(0, 0, 0, dp(10));
+        root.addView(keyNote);
 
         statusView = new TextView(this);
         statusView.setTextSize(16);
         statusView.setTextColor(Color.rgb(150, 220, 180));
-        statusView.setPadding(0, 0, 0, dp(12));
+        statusView.setPadding(0, 0, 0, dp(10));
         root.addView(statusView);
 
         LinearLayout buttons = new LinearLayout(this);
@@ -135,7 +194,7 @@ public class MainActivity extends Activity {
         root.addView(scroll, sp);
 
         TextView footer = new TextView(this);
-        footer.setText("Depois de ler, compartilhe o JSON comigo para eu identificar a tecnologia e as limitações da credencial.");
+        footer.setText("Compartilhe o JSON comigo depois da leitura. Ele não contém a chave informada.");
         footer.setTextSize(12);
         footer.setTextColor(Color.rgb(160, 165, 175));
         root.addView(footer);
@@ -156,22 +215,14 @@ public class MainActivity extends Activity {
                     | NfcAdapter.FLAG_READER_NFC_F
                     | NfcAdapter.FLAG_READER_NFC_V
                     | NfcAdapter.FLAG_READER_NFC_BARCODE;
-            nfcAdapter.enableReaderMode(this, new NfcAdapter.ReaderCallback() {
-                @Override
-                public void onTagDiscovered(Tag tag) {
-                    handleTag(tag);
-                }
-            }, flags, null);
+            nfcAdapter.enableReaderMode(this, this::handleTag, flags, null);
         }
     }
 
     @Override
     protected void onPause() {
         if (nfcAdapter != null) {
-            try {
-                nfcAdapter.disableReaderMode(this);
-            } catch (Exception ignored) {
-            }
+            try { nfcAdapter.disableReaderMode(this); } catch (Exception ignored) {}
         }
         super.onPause();
     }
@@ -192,14 +243,14 @@ public class MainActivity extends Activity {
 
     private JSONObject inspectTag(Tag tag) throws Exception {
         JSONObject root = new JSONObject();
-        root.put("schema", "com.amarildo.nfc-diagnostico/v1");
+        root.put("schema", "com.amarildo.nfc-diagnostico/v1.1");
         root.put("capturedAtUtc", isoUtcNow());
 
         JSONObject app = new JSONObject();
         app.put("name", "NFC Diagnóstico");
-        app.put("version", "1.0");
-        app.put("purpose", "Inventário passivo das propriedades NFC expostas pela API pública do Android");
-        app.put("securityNote", "Nenhuma chave é testada, derivada ou extraída; nenhuma autenticação protegida é tentada.");
+        app.put("version", "1.1");
+        app.put("purpose", "Inventário NFC e mapa estrutural de MIFARE Classic");
+        app.put("securityNote", "Sem brute force, dicionário, recuperação de chaves ou exportação de blocos protegidos. Uma chave fornecida pelo usuário pode apenas ser validada por setor.");
         root.put("app", app);
 
         JSONObject device = new JSONObject();
@@ -210,7 +261,6 @@ public class MainActivity extends Activity {
         device.put("androidRelease", Build.VERSION.RELEASE);
         device.put("sdkInt", Build.VERSION.SDK_INT);
         device.put("nfcEnabled", nfcAdapter != null && nfcAdapter.isEnabled());
-        device.put("androidId", Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID));
         root.put("device", device);
 
         JSONObject tagObj = new JSONObject();
@@ -221,9 +271,7 @@ public class MainActivity extends Activity {
         tagObj.put("androidTagToString", String.valueOf(tag));
 
         JSONArray techs = new JSONArray();
-        for (String tech : tag.getTechList()) {
-            techs.put(tech);
-        }
+        for (String techName : tag.getTechList()) techs.put(techName);
         tagObj.put("techList", techs);
         root.put("tag", tagObj);
 
@@ -287,7 +335,77 @@ public class MainActivity extends Activity {
             o.put("sectorCount", mc.getSectorCount());
             o.put("blockCount", mc.getBlockCount());
             o.put("maxTransceiveLength", mc.getMaxTransceiveLength());
-            o.put("note", "Somente metadados. Nenhuma autenticação de setor ou leitura de bloco protegido foi tentada.");
+
+            JSONArray layout = new JSONArray();
+            for (int sector = 0; sector < mc.getSectorCount(); sector++) {
+                JSONObject s = new JSONObject();
+                int first = mc.sectorToBlock(sector);
+                int count = mc.getBlockCountInSector(sector);
+                s.put("sector", sector);
+                s.put("firstBlock", first);
+                s.put("blockCount", count);
+                s.put("lastBlock", first + count - 1);
+                s.put("trailerBlock", first + count - 1);
+
+                JSONArray blocks = new JSONArray();
+                for (int b = 0; b < count; b++) blocks.put(first + b);
+                s.put("blocks", blocks);
+                layout.put(s);
+            }
+            o.put("sectorLayout", layout);
+
+            JSONObject authTest = new JSONObject();
+            byte[] suppliedKey = parseHexKey(suppliedKeyHex);
+            authTest.put("keyProvided", suppliedKeyHex != null && !suppliedKeyHex.isEmpty());
+            authTest.put("keyType", suppliedKeyIsA ? "A" : "B");
+            authTest.put("keyValueIncludedInJson", false);
+            authTest.put("protectedBlockContentsRead", false);
+
+            if (suppliedKey != null) {
+                authTest.put("attempted", true);
+                JSONArray results = new JSONArray();
+                int successCount = 0;
+                String transportError = null;
+
+                try {
+                    mc.connect();
+                    for (int sector = 0; sector < mc.getSectorCount(); sector++) {
+                        JSONObject r = new JSONObject();
+                        r.put("sector", sector);
+                        boolean ok;
+                        try {
+                            ok = suppliedKeyIsA
+                                    ? mc.authenticateSectorWithKeyA(sector, suppliedKey)
+                                    : mc.authenticateSectorWithKeyB(sector, suppliedKey);
+                        } catch (Exception e) {
+                            ok = false;
+                            r.put("error", e.getClass().getSimpleName());
+                        }
+                        r.put("authenticated", ok);
+                        if (ok) successCount++;
+                        results.put(r);
+                    }
+                } catch (Exception e) {
+                    transportError = e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage());
+                } finally {
+                    try { mc.close(); } catch (Exception ignored) {}
+                }
+
+                authTest.put("successfulSectorCount", successCount);
+                authTest.put("sectorResults", results);
+                if (transportError != null) authTest.put("transportError", transportError);
+                authTest.put("note", "O teste apenas verifica se a chave fornecida autentica cada setor; não lê nem exporta os blocos.");
+            } else {
+                authTest.put("attempted", false);
+                if (suppliedKeyHex == null || suppliedKeyHex.isEmpty()) {
+                    authTest.put("reason", "Nenhuma chave informada.");
+                } else {
+                    authTest.put("reason", "A chave deve conter exatamente 12 dígitos hexadecimais (6 bytes).");
+                }
+            }
+
+            o.put("authorizationTest", authTest);
+            o.put("note", "O mapa de setores é estrutural. Dados e trailers protegidos não são lidos.");
             tech.put("MifareClassic", o);
         }
 
@@ -360,7 +478,7 @@ public class MainActivity extends Activity {
         interpretationHints.put("mifareClassicPresent", mc != null);
         interpretationHints.put("mifareUltralightPresent", mu != null);
         interpretationHints.put("ndefPresent", ndef != null);
-        interpretationHints.put("important", "A ausência de conteúdo legível não significa ausência de dados: credenciais seguras frequentemente expõem apenas identificação e parâmetros de protocolo sem autenticação.");
+        interpretationHints.put("important", "Uma autenticação bem-sucedida confirma apenas que a chave fornecida é aceita naquele setor. Este aplicativo não determina sozinho como o sistema de acesso valida a credencial.");
         root.put("interpretationHints", interpretationHints);
 
         return root;
@@ -412,6 +530,21 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 Toast.makeText(this, "Falha ao salvar: " + e.getMessage(), Toast.LENGTH_LONG).show();
             }
+        }
+    }
+
+    private static byte[] parseHexKey(String value) {
+        if (value == null) return null;
+        String s = value.replaceAll("[^0-9A-Fa-f]", "");
+        if (s.length() != 12) return null;
+        byte[] out = new byte[6];
+        try {
+            for (int i = 0; i < 6; i++) {
+                out[i] = (byte) Integer.parseInt(s.substring(i * 2, i * 2 + 2), 16);
+            }
+            return out;
+        } catch (Exception e) {
+            return null;
         }
     }
 
